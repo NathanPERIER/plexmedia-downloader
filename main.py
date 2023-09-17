@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 
-from src.dataobj.user         import PlexUser
-from src.dataobj.server       import PlexServer
+from src.constants            import BASE_HEADERS
+from src.authenticator        import PlexAuthenticator
+from src.dataobj.auth_data    import PlexAuthData
 from src.dataobj.node         import PlexNode
 from src.dataobj.show         import PlexShow
 from src.dataobj.season       import PlexSeason
@@ -15,80 +16,32 @@ from urllib.parse import urlparse, parse_qs
 from tqdm.auto import tqdm
 import os
 import argparse
-import base64
-import json
 
-from typing import Sequence, Mapping, MutableMapping, Optional, Any
+from typing import Sequence, Mapping, Tuple, Optional, Any
+
+
+def parse_url(url: str) -> Tuple[str,str] :
+    frag = urlparse(urlparse(url).fragment.lstrip('!'))
+    params = parse_qs(frag.query)
+    return (
+        frag.path.split('/')[2],
+        params['key'][0]
+    )
 
 
 class PlexDownloader:
-    headers = {
-        'X-Plex-Client-Identifier': 'PlexDownloader',
-        'X-Plex-Product': 'PlexDownloader',
-        'Accept': 'application/json'
-    }
 
-    servers: MutableMapping[str, PlexServer] = {}
-
-    def login(self):
-        if self.cookie is not None:
-            cookie = str(base64.b64decode(self.cookie), "utf-8")
-            self.token = json.loads(cookie)["token"]
-
-        if self.token:
-            # Get user info
-            headers = {
-                **self.headers,
-                'X-Plex-Token': self.token
-            }
-
-            r = requests.get("https://plex.tv/users/account.json", headers=headers)
-        else:
-            # Login
-            payload = {
-                'user[login]': self.email,
-                'user[password]': self.password
-            }
-
-            r = requests.post("https://plex.tv/users/sign_in.json",
-                              headers=self.headers, data=payload)
-
-        if not r.ok :
-            print(r.json()['error'])
-            quit(1)
-
-        self.user = PlexUser(r.json()['user'])
-
-        return self.user
-
-    def get_servers(self):
-        # get servers
-        headers = {
-            **self.headers,
-            'X-Plex-Token': self.user.auth_token
-        }
-
-        r = requests.get(
-            "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1", headers=headers)
-
-        for server_data in r.json():
-            server = PlexServer(server_data)
-            self.servers[server.client_id] = server
-        return self.servers
-
-    def _get_url(self, url):
-        headers = {
-            **self.headers,
+    def _get_url(self, url) :
+        response = requests.get(url, headers = {
+            **BASE_HEADERS,
             'X-Plex-Token': self.server.access_token
-        }
-
-        response = requests.get(url, headers=headers)
+        })
 
         if response.ok :
             return response.json()
         raise DownloadError(f"request to url \"{url}\" yielded response code {response.status_code} {response.reason}")
 
-    def _parse_movie(self, movie):
+    def _parse_movie(self, movie): # TODO
         key = movie["Media"][0]['Part'][0]['key']
         extension = key.split(".")[-1]
 
@@ -123,18 +76,10 @@ class PlexDownloader:
             return PlexEpisode(data)
 
         elif data['type'] == 'movie' :
-            print(data)
-            self._parse_movie(data) # TODO
+            self._parse_movie(data)
 
         print(f"Media type {data['type']} isn't supported yet")
         return None
-    
-
-    def _parse_url(self, url: str):
-        frag = urlparse(urlparse(url).fragment.lstrip('!'))
-        params = parse_qs(frag.query)
-        self.server_hash = frag.path.split('/')[2]
-        self.rating_key = params['key'][0]
 
     def _get_metadata(self) -> Sequence[PlexNode] :
         response = self._get_url(self.server.uri + self.rating_key)
@@ -144,20 +89,8 @@ class PlexDownloader:
         ]
     
 
-    def download(self, url: str):
-        self._parse_url(url)
+    def download(self) :
 
-        user = self.login()
-
-        print(f"Logged in as {user.username}")
-
-        servers = self.get_servers()
-        server_count = len(servers)
-        print(f"Found {server_count} server{'s' if server_count != 1 else ''}")
-
-        if self.server_hash not in self.servers :
-            raise DownloadError(f"user {user.username} doesn't have access to the server on which the resource is hosted")
-        self.server = self.servers[self.server_hash]
         print(f"Downloading from Plex server at {self.server.name}")
         if not self.server.online :
             print('Caution: server may be offline')
@@ -191,7 +124,7 @@ class PlexDownloader:
             for m in to_download :
                 response = requests.get(m.url, stream=True, headers=headers)
                 if not response.ok :
-                    print(f"Error HTTP {response.status_code} getting {m.name}")
+                    print(f"Got HTTP {response.status_code} error while downloading {m.name}")
                     continue
 
                 file_name = os.path.join(folder_path, m.get_ep_indicator())
@@ -232,31 +165,24 @@ class PlexDownloader:
 
         args = ap.parse_args()
 
-        self.email = args.username
-        self.password = args.password
-        self.token = args.token
-        self.cookie = args.cookie
         self.original_filename = args.original_filename
         self.skip_existing = args.skip_existing
 
-        if args.authfile is not None and self.cant_authenticate_user() :
-            with open(args.authfile, 'r') as f :
-                auth_data = json.load(f)
-            for field in ['email', 'password', 'token', 'cookie'] :
-                if field in auth_data and type(auth_data[field]) == str :
-                    self.__dict__[field] = auth_data[field]
+        auth_data = PlexAuthData()
+        auth_data.username = args.username
+        auth_data.password = args.password
+        auth_data.token    = args.token
+        auth_data.cookie   = args.cookie
 
-        if self.cant_authenticate_user():
-            if self.email is None:
-                self.email = input('Enter username > ')
-            if self.password is None:
-                from src.utils.getpass import getpass
-                self.password = getpass('Enter password > ')
+        if args.authfile is not None and not auth_data.is_valid() :
+            auth_data.load_file(args.authfile)
+        
+        server_hash, self.rating_key = parse_url(args.url)
 
-        self.download(args.url)
-    
-    def cant_authenticate_user(self) :
-        return ((self.email is None or self.password is None) and self.token is None and self.cookie is None)
+        authenticator = PlexAuthenticator(auth_data)
+        self.server = authenticator.get_server(server_hash)
+
+        self.download()
 
     def __init__(self) :
         pass
