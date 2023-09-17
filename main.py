@@ -1,11 +1,24 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
+
+from src.dataobj.user         import PlexUser
+from src.dataobj.server       import PlexServer
+from src.dataobj.node         import PlexNode
+from src.dataobj.show         import PlexShow
+from src.dataobj.season       import PlexSeason
+from src.dataobj.episode      import PlexEpisode
+from src.dataobj.media_record import PlexMediaRecord
+from src.utils.errors         import DownloadError
+from src.utils.table          import TableBuilder
+
 import requests
-from urllib.parse import urlparse, unquote, parse_qs
+from urllib.parse import urlparse, parse_qs
 from tqdm.auto import tqdm
 import os
 import argparse
 import base64
 import json
+
+from typing import Sequence, Mapping, MutableMapping, Optional, Any
 
 
 class PlexDownloader:
@@ -15,7 +28,7 @@ class PlexDownloader:
         'Accept': 'application/json'
     }
 
-    servers = {}
+    servers: MutableMapping[str, PlexServer] = {}
 
     def login(self):
         if self.cookie is not None:
@@ -29,8 +42,7 @@ class PlexDownloader:
                 'X-Plex-Token': self.token
             }
 
-            r = requests.get(
-                "https://plex.tv/users/account.json", headers=headers)
+            r = requests.get("https://plex.tv/users/account.json", headers=headers)
         else:
             # Login
             payload = {
@@ -41,11 +53,11 @@ class PlexDownloader:
             r = requests.post("https://plex.tv/users/sign_in.json",
                               headers=self.headers, data=payload)
 
-        if r.status_code != 200:
-            print(r.json()["error"])
+        if not r.ok :
+            print(r.json()['error'])
             quit(1)
 
-        self.user = r.json()['user']
+        self.user = PlexUser(r.json()['user'])
 
         return self.user
 
@@ -53,95 +65,28 @@ class PlexDownloader:
         # get servers
         headers = {
             **self.headers,
-            'X-Plex-Token': self.user['authToken']
+            'X-Plex-Token': self.user.auth_token
         }
 
         r = requests.get(
             "https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1", headers=headers)
 
-        for resources in r.json():
-            server = {
-                "id": resources["clientIdentifier"],
-                "access_token": resources["accessToken"],
-                "name": resources["name"],
-                "public_address": resources["publicAddress"],
-            }
-
-            for connection in resources["connections"]:
-                if connection["address"] == server["public_address"]:
-                    server["address"] = connection["uri"]
-
-            self.servers[server['id']] = server
+        for server_data in r.json():
+            server = PlexServer(server_data)
+            self.servers[server.client_id] = server
         return self.servers
 
     def _get_url(self, url):
         headers = {
             **self.headers,
-            'X-Plex-Token': self.server["access_token"]
+            'X-Plex-Token': self.server.access_token
         }
 
         response = requests.get(url, headers=headers)
 
-        if response.status_code == 200:
+        if response.ok :
             return response.json()
-        else:
-            return False
-
-    def _parse_show(self, rating_key):
-        url = self.server['address'] + \
-            "/library/metadata/"+rating_key+"/allLeaves"
-
-        response = self._get_url(url)
-
-        if response:
-            return self._parse_episodes(response['MediaContainer']['Metadata'])
-
-        return False
-
-    def _parse_episodes(self, episodes):
-        parsed_episodes = []
-
-        for episode in episodes:
-            if episode['type'] == "episode":
-                parsed_episode = self._parse_episode(episode)
-                parsed_episodes.append(parsed_episode)
-
-        return parsed_episodes
-
-    def _parse_episode(self, episode):
-        key = episode['Media'][0]['Part'][0]['key']
-        extension = key.split(".")[-1]
-        # Show - s01e01 - Episode Title
-        if self.original_filename:
-            filename = episode['Media'][0]['Part'][0]["file"].split("/")[-1]
-        else:
-            season_number = str(str(episode['parentIndex']).zfill(2))
-            episode_number = str(str(episode['index']).zfill(2))
-            filename = episode['grandparentTitle']+" - s"+season_number + \
-                "e"+episode_number+" - "+episode['title']+"."+extension
-
-        folder = os.path.join(
-            episode['grandparentTitle'], episode['parentTitle'])
-
-        return {
-            "url": self.server['address']+key,
-            "filename": filename,
-            "folder": folder,
-            "title": episode['title']
-        }
-
-    def _parse_season(self, rating_key):
-        url = self.server['address'] + \
-            "/library/metadata/"+rating_key+"/children"
-
-        parsed_episodes = []
-
-        response = self._get_url(url)
-
-        if response:
-            return self._parse_episodes(response['MediaContainer']['Metadata'])
-
-        return False
+        raise DownloadError(f"request to url \"{url}\" yielded response code {response.status_code} {response.reason}")
 
     def _parse_movie(self, movie):
         key = movie["Media"][0]['Part'][0]['key']
@@ -150,136 +95,140 @@ class PlexDownloader:
         if self.original_filename:
             filename = movie['Media'][0]['Part'][0]["file"].split("/")[-1]
         else:
-            filename = movie['title']+"."+extension
+            filename = movie['title'] + "." + extension
 
         folder = movie['title']
-        title = movie['title']
 
         return [
             {
-                "url": self.server['address']+key,
+                "url": self.server.uri + key,
                 "filename": filename,
                 "folder": folder,
                 "title": movie['title']
             }
         ]
 
-    def _parse_metadata(self, data):
-        media_content = []
+    def parse_media(self, data: Mapping[str, Any]) -> Optional[PlexNode]:
+        if data['type'] == 'show' :
+            url = self.server.uri + "/library/metadata/" + data['ratingKey'] + "/allLeaves"
+            response = self._get_url(url)
+            return PlexShow(response['MediaContainer'])
 
-        for media in data:
-            rating_key = media['ratingKey']
-            if media['type'] == "show":
-                parsed_media = self._parse_show(rating_key)
+        elif data['type'] == 'season' :
+            url = self.server.uri + "/library/metadata/" + data['ratingKey'] + "/children"
+            response = self._get_url(url)
+            return PlexSeason(response['MediaContainer'])
 
-            elif media['type'] == "season":
-                parsed_media = self._parse_season(rating_key)
+        elif data['type'] == 'episode' :
+            return PlexEpisode(data)
 
-            elif media['type'] == "episode":
-                parsed_media = [self._parse_episode(media)]
+        elif data['type'] == 'movie' :
+            print(data)
+            self._parse_movie(data) # TODO
 
-            elif media['type'] == "movie":
-                parsed_media = self._parse_movie(media)
+        print(f"Media type {data['type']} isn't supported yet")
+        return None
+    
 
-            else:
-                print("Media type %s isn't supported yet" % media['type'])
-                continue
+    def _parse_url(self, url: str):
+        frag = urlparse(urlparse(url).fragment.lstrip('!'))
+        params = parse_qs(frag.query)
+        self.server_hash = frag.path.split('/')[2]
+        self.rating_key = params['key'][0]
 
-            media_content = media_content + parsed_media
-        return media_content
+    def _get_metadata(self) -> Sequence[PlexNode] :
+        response = self._get_url(self.server.uri + self.rating_key)
+        return [
+            self.parse_media(data)
+            for data in response['MediaContainer']['Metadata']
+        ]
+    
 
-    def _get_metadata(self):
-        url = self.server["address"]+self.rating_key
+    def download(self, url: str):
+        self._parse_url(url)
 
-        response = self._get_url(url)
-
-        if response:
-            return self._parse_metadata(response['MediaContainer']['Metadata'])
-
-        return False
-
-    def download(self):
         user = self.login()
 
-        print("Logged in as: %s" % user['username'])
+        print(f"Logged in as {user.username}")
 
         servers = self.get_servers()
         server_count = len(servers)
-        print("Found %s servers" % server_count)
+        print(f"Found {server_count} server{'s' if server_count != 1 else ''}")
 
+        if self.server_hash not in self.servers :
+            raise DownloadError(f"user {user.username} doesn't have access to the server on which the resource is hosted")
         self.server = self.servers[self.server_hash]
+        print(f"Downloading from Plex server at {self.server.name}")
+        if not self.server.online :
+            print('Caution: server may be offline')
 
-        print("Getting urls of content to download.")
-        contents = self._get_metadata()
-
-        if not contents:
-            print("Couldn't get metadata")
+        nodes = self._get_metadata()
+        if len(nodes) == 0 :
+            print('No media found')
             return
-
-        print("Found %s media content to download" % len(contents))
-
+        
         headers = {
-            'X-Plex-Token': self.server["access_token"]
+            'X-Plex-Token': self.server.access_token
         }
 
-        for content in contents:
-            if not os.path.exists(content['folder']):
-                print("Directories don't exists, creating folders")
-                os.makedirs(content['folder'])
+        for node in nodes :
+            print(f"Found resource {node.get_name()}")
 
-            file_name = os.path.join(
-                content['folder'], content['filename'].replace("/", "-"))
+            folder_path = node.get_name().replace('/', '∕')
+            if not os.path.exists(folder_path) :
+                os.mkdir(folder_path)
 
-            response = requests.get(
-                content['url'], stream=True, headers=headers)
+            to_download: list[PlexMediaRecord] = []
+            
+            builder = TableBuilder(['Episode', 'Title', 'Download'], node.get_name())
+            for m in node.get_media(self.server.uri) :
+                skip = self.skip_existing and os.path.exists(os.path.join(folder_path, m.get_ep_indicator()))
+                if not skip :
+                    to_download.append(m)
+                builder.add_row([m.get_ep_indicator(), m.name, 'no' if skip else 'yes'])
+            builder.print()
 
-            if response.status_code == 400:
-                print("Error getting %s" % content['title'])
-                continue
+            for m in to_download :
+                response = requests.get(m.url, stream=True, headers=headers)
+                if not response.ok :
+                    print(f"Error HTTP {response.status_code} getting {m.name}")
+                    continue
 
-            with open(file_name, "wb") as fout:
-                with tqdm(
-                    unit='B', unit_scale=True, unit_divisor=1024, miniters=1,
-                    desc=file_name, total=int(
-                        response.headers.get('content-length', 0))
-                ) as pbar:
-                    for chunk in response.iter_content(chunk_size=4096):
-                        fout.write(chunk)
-                        pbar.update(len(chunk))
-        return
+                file_name = os.path.join(folder_path, m.get_ep_indicator())
+                with open(file_name, 'wb') as fout:
+                    with tqdm(
+                        unit='B', unit_scale=True, unit_divisor=1024, miniters=1,
+                        desc=file_name, total=int(response.headers.get('content-length', 0))
+                    ) as pbar:
+                        for chunk in response.iter_content(chunk_size=4096):
+                            fout.write(chunk)
+                            pbar.update(len(chunk))
 
-    def parse_url(self, url):
-        if not url:
-            print("No url provided")
-            return False
-
-        fragment = urlparse(url).fragment.strip('!').split('/')
-        self.server_hash = fragment[2]
-        self.rating_key = parse_qs(fragment[3].split('?')[1])['key'][0]
-
-        return True
 
     def command_line(self):
         ap = argparse.ArgumentParser()
 
-        ap.add_argument("-u", "--username", required=False,
-                        help="Plex.TV Email/Username")
+        ap.add_argument("-u", "--username", required=False, help="Plex.TV Email/Username")
 
-        ap.add_argument("-p", "--password", required=False,
-                        help="Plex.TV Password")
+        ap.add_argument("-p", "--password", required=False, help="Plex.TV Password")
 
-        ap.add_argument("-c", "--cookie", required=False,
-                        help="Plex.tv Auth Sync cookie")
-
-        ap.add_argument("--original-filename", required=False,
-                        default=False, action='store_true', help="Name content by original name")
+        ap.add_argument("-c", "--cookie", required=False, help="Plex.tv Auth Sync cookie")
 
         ap.add_argument("-t", "--token", required=False, help="Plex Token")
 
         ap.add_argument("-f", "--authfile", required=False, help="Path to a json file containing authentication data")
 
-        ap.add_argument(
-            "url", help="URL to Movie, Show, Season, Episode. TIP: Put url inside single quotes.")
+        ap.add_argument("--original-filename", required=False,
+                        default=False, action='store_true', help="Name content by original name")
+        
+        ap.add_argument("--skip-existing", required=False,
+                        default=False, action='store_true', help="Skip files that already exist on the filesystem")
+        
+        # TODO
+        # ap.add_argument("--cherrypick", required=False,
+        #                 default=False, action='store_true', help="Hand pick which media to download")
+
+        ap.add_argument("url", help="URL to Movie, Show, Season, Episode. TIP: Put url inside single quotes.")
 
         args = ap.parse_args()
 
@@ -288,32 +237,29 @@ class PlexDownloader:
         self.token = args.token
         self.cookie = args.cookie
         self.original_filename = args.original_filename
+        self.skip_existing = args.skip_existing
 
-        if args.authfile is not None and self.cantAuthenticateUser():
-            with open(args.authfile, 'r') as f:
+        if args.authfile is not None and self.cant_authenticate_user() :
+            with open(args.authfile, 'r') as f :
                 auth_data = json.load(f)
-            for field in ['email', 'password', 'token', 'cookie']:
-                if field in auth_data and type(auth_data[field]) == str:
+            for field in ['email', 'password', 'token', 'cookie'] :
+                if field in auth_data and type(auth_data[field]) == str :
                     self.__dict__[field] = auth_data[field]
 
-        if self.cantAuthenticateUser():
+        if self.cant_authenticate_user():
             if self.email is None:
                 self.email = input('Enter username > ')
             if self.password is None:
-                try:
-                    from stdiomask import getpass
-                except ImportError:
-                    from getpass import getpass
+                from src.utils.getpass import getpass
                 self.password = getpass('Enter password > ')
 
-        self.parse_url(args.url)
-        self.download()
+        self.download(args.url)
     
-    def cantAuthenticateUser(self) :
+    def cant_authenticate_user(self) :
         return ((self.email is None or self.password is None) and self.token is None and self.cookie is None)
 
-    def __init__(self):
-        return
+    def __init__(self) :
+        pass
 
 
 if __name__ == "__main__":
