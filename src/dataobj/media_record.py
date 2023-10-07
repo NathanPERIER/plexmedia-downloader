@@ -1,6 +1,7 @@
 
 from typing import Final
 
+from src.utils.format import format_ep_indicator
 
 class PlexMediaRecord :
 
@@ -12,9 +13,7 @@ class PlexMediaRecord :
         self.ext:     Final[str] = extension
     
     def get_ep_indicator(self) -> str :
-        season_num  = str(self.season).rjust(2, '0')
-        episode_num = str(self.episode).rjust(2, '0')
-        return f"S{season_num}E{episode_num}"
+        return format_ep_indicator(self.season, self.episode)
     
     def get_filename(self) -> str :
         return f"{self.get_ep_indicator()}.{self.ext}"

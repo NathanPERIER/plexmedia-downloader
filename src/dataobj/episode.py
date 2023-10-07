@@ -1,8 +1,10 @@
 
+from typing import Final, Sequence, Mapping, Any
+
 from .node         import PlexNode
 from .media_record import PlexMediaRecord
 
-from typing import Final, Sequence, Mapping, Any
+from src.utils.format import format_ep_indicator
 
 
 class PlexEpisode(PlexNode) :
@@ -24,9 +26,7 @@ class PlexEpisode(PlexNode) :
         return self.show
 
     def get_name(self) -> str :
-        season_num  = str(self.season).rjust(2, '0')
-        episode_num = str(self.episode).rjust(2, '0')
-        return f"{self.show} S{season_num}E{episode_num}"
+        return f"{self.show} {format_ep_indicator(self.season, self.episode)}"
     
     def __lt__(self, other: "PlexEpisode") :
         if self.season < other.season :
