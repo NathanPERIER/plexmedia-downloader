@@ -13,3 +13,7 @@ class PlexNode(ABC) :
     @abstractmethod
     def get_name(self) -> str :
         pass
+
+    @abstractmethod
+    def get_base_name(self) -> str :
+        pass

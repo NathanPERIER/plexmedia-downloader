@@ -24,7 +24,10 @@ class PlexShow(PlexNode) :
         return res
 
     def get_name(self) -> str :
-        return f"{self.title}"
+        return self.title
+
+    def get_base_name(self) -> str :
+        return self.title
 
 
 # 'MediaContainer'

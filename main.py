@@ -115,7 +115,7 @@ class PlexDownloader:
         for node in nodes :
             print(f"Found resource {node.get_name()}")
 
-            folder_path = node.get_name().replace('/', '∕')
+            folder_path = node.get_base_name().replace('/', '∕')
             if not os.path.exists(folder_path) and not options.dry_run :
                 os.mkdir(folder_path)
 

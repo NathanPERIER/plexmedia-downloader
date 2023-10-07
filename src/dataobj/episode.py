@@ -19,6 +19,10 @@ class PlexEpisode(PlexNode) :
     def get_media(self, server_uri: str) -> Sequence[PlexMediaRecord] :
         return [PlexMediaRecord(self.season, self.episode, self.title, server_uri + self.key, self.ext)]
 
+
+    def get_base_name(self) -> str :
+        return self.show
+
     def get_name(self) -> str :
         season_num  = str(self.season).rjust(2, '0')
         episode_num = str(self.episode).rjust(2, '0')

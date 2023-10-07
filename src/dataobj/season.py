@@ -24,3 +24,6 @@ class PlexSeason(PlexNode) :
 
     def get_name(self) -> str :
         return f"{self.show} Season {self.number}"
+    
+    def get_base_name(self) -> str :
+        return self.show
