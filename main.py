@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 import os
 import argparse
 
-from typing import Sequence, Mapping, Tuple, Optional, Any
+from typing import Final, Sequence, Mapping, Tuple, Optional, Any
 
 
 def parse_url(url: str) -> Tuple[str,str] :
@@ -27,6 +27,14 @@ def parse_url(url: str) -> Tuple[str,str] :
         frag.path.split('/')[2],
         params['key'][0]
     )
+
+
+class DownloadOptions :
+    
+    def __init__(self, skip_existing: bool, dry_run: bool) :
+        self.skip_existing: Final[bool] = skip_existing
+        self.dry_run:       Final[bool] = dry_run
+        self.cherrypick:    Final[bool] = False
 
 
 class PlexDownloader:
@@ -89,7 +97,7 @@ class PlexDownloader:
         ]
     
 
-    def download(self) :
+    def download(self, options: DownloadOptions) :
 
         print(f"Downloading from Plex server at {self.server.name}")
         if not self.server.online :
@@ -108,30 +116,35 @@ class PlexDownloader:
             print(f"Found resource {node.get_name()}")
 
             folder_path = node.get_name().replace('/', '∕')
-            if not os.path.exists(folder_path) :
+            if not os.path.exists(folder_path) and not options.dry_run :
                 os.mkdir(folder_path)
 
             to_download: list[PlexMediaRecord] = []
             
             builder = TableBuilder(['Episode', 'Title', 'Download'], node.get_name())
             for m in node.get_media(self.server.uri) :
-                skip = self.skip_existing and os.path.exists(os.path.join(folder_path, m.get_ep_indicator()))
+                skip = options.skip_existing and os.path.exists(os.path.join(folder_path, m.get_filename()))
                 if not skip :
                     to_download.append(m)
                 builder.add_row([m.get_ep_indicator(), m.name, 'no' if skip else 'yes'])
             builder.print()
 
             for m in to_download :
+                file_path = os.path.join(folder_path, m.get_filename())
+
+                if options.dry_run :
+                    print(file_path)
+                    continue
+
                 response = requests.get(m.url, stream=True, headers=headers)
                 if not response.ok :
                     print(f"Got HTTP {response.status_code} error while downloading {m.name}")
                     continue
 
-                file_name = os.path.join(folder_path, m.get_ep_indicator())
-                with open(file_name, 'wb') as fout:
+                with open(file_path, 'wb') as fout:
                     with tqdm(
                         unit='B', unit_scale=True, unit_divisor=1024, miniters=1,
-                        desc=file_name, total=int(response.headers.get('content-length', 0))
+                        desc=file_path, total=int(response.headers.get('content-length', 0))
                     ) as pbar:
                         for chunk in response.iter_content(chunk_size=4096):
                             fout.write(chunk)
@@ -140,6 +153,9 @@ class PlexDownloader:
 
     def command_line(self):
         ap = argparse.ArgumentParser()
+
+        ap.add_argument("-n", "--dry-run", required=False, 
+                        default=False, action='store_true', help="Print the files that would be downloaded and exit")
 
         ap.add_argument("-u", "--username", required=False, help="Plex.TV Email/Username")
 
@@ -166,7 +182,8 @@ class PlexDownloader:
         args = ap.parse_args()
 
         self.original_filename = args.original_filename
-        self.skip_existing = args.skip_existing
+
+        options = DownloadOptions(args.skip_existing, args.dry_run)
 
         auth_data = PlexAuthData()
         auth_data.username = args.username
@@ -182,7 +199,7 @@ class PlexDownloader:
         authenticator = PlexAuthenticator(auth_data)
         self.server = authenticator.get_server(server_hash)
 
-        self.download()
+        self.download(options)
 
     def __init__(self) :
         pass
