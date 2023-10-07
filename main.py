@@ -10,6 +10,7 @@ from src.dataobj.episode      import PlexEpisode
 from src.dataobj.media_record import PlexMediaRecord
 from src.utils.errors         import DownloadError
 from src.utils.table          import TableBuilder
+from src.utils.format         import format_size_bytes
 
 import requests
 from urllib.parse import urlparse, parse_qs
@@ -116,7 +117,37 @@ class PlexDownloader:
             print(f"Found resource {node.get_name()}")
 
             folder_path = node.get_base_name().replace('/', '∕')
-            if not os.path.exists(folder_path) and not options.dry_run :
+
+            if options.dry_run :
+                nb_nodes = 0
+                total_dl = 0
+                total_size = 0
+                builder = TableBuilder(['File', 'Title', 'Download', 'Size'], node.get_name())
+                for m in node.get_media(self.server.uri) :
+                    nb_nodes += 1
+                    file_path = os.path.join(folder_path, m.get_filename())
+                    skip = options.skip_existing and os.path.exists(os.path.join(folder_path, m.get_filename()))
+                    size = '?'
+                    if skip :
+                        size = 'N/A'
+                    else :
+                        total_dl += 1
+                        try :
+                            response = requests.head(m.url, headers=headers)
+                            if not response.ok :
+                                size = f"NaN (Err {response.status_code})"
+                            elif 'Content-Length' in response.headers :
+                                content_length = int(response.headers['Content-Length'])
+                                total_size += content_length
+                                size = format_size_bytes(content_length)
+                        except :
+                            size = "NaN (Error)"
+                    builder.add_row([file_path, m.name, 'no' if skip else 'yes', size])
+                builder.print()
+                print(f"TOTAL: {total_dl}/{nb_nodes} ep, {format_size_bytes(total_size)}")
+                continue
+
+            if not os.path.exists(folder_path) :
                 os.mkdir(folder_path)
 
             to_download: list[PlexMediaRecord] = []
@@ -131,10 +162,6 @@ class PlexDownloader:
 
             for m in to_download :
                 file_path = os.path.join(folder_path, m.get_filename())
-
-                if options.dry_run :
-                    print(file_path)
-                    continue
 
                 response = requests.get(m.url, stream=True, headers=headers)
                 if not response.ok :
